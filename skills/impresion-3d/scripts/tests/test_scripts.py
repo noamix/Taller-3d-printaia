@@ -2974,6 +2974,119 @@ class TestVariasImpresoras(unittest.TestCase):
         self.assertIn("base_id = prueba-maquina", info)
 
 
+class TestBorrar(unittest.TestCase):
+    """0.1.42: «Borrar» en cada tarjeta; mandar_a_la_papelera (taller3d-orca) manda la carpeta de la pieza a la
+    papelera de la PC, solo esa y nunca para siempre; catalogo.py quitar la saca del panel."""
+
+    def setUp(self):
+        import os
+        import shutil
+        sys.path.insert(0, str(RAIZ / "instalador"))
+        import abrir_orca
+        self.ao, self.shutil, self.os = abrir_orca, shutil, os
+        self.tmp = Path(tempfile.mkdtemp())
+        self.raiz = self.tmp / "Taller 3D"
+        self.pieza = self.raiz / "impresiones" / "2026-11-26_esquinero_mi-creality-hi"
+        (self.pieza / "producto").mkdir(parents=True)
+        (self.pieza / "pieza.stl").write_bytes(b"s" * 3000)
+        (self.pieza / "producto" / "producto-1.jpg").write_bytes(b"j" * 2000)
+        (self.raiz / "disenos" / "2026-11-20_tapa").mkdir(parents=True)
+        (self.raiz / "taller-3d").mkdir()
+        (self.raiz / "taller-3d" / "catalogo.json").write_text("{}", encoding="utf-8")
+        (self.tmp / "bin").mkdir()                                     # sin gio: la papelera de freedesktop a mano
+        self.datos = self.tmp / "datos"
+        self.entorno = {"TALLER3D_CARPETA": str(self.raiz), "XDG_DATA_HOME": str(self.datos),
+                        "PATH": str(self.tmp / "bin")}
+
+    def tearDown(self):
+        self.shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_a_la_papelera_solo_la_carpeta_de_una_pieza(self):
+        srv = self.ao.Servidor(self.entorno)
+        afuera = self.tmp / "afuera"
+        afuera.mkdir()
+        (self.raiz / "impresiones" / "2026-11-25_enlace").symlink_to(afuera, target_is_directory=True)
+        for mala in ("", "impresiones", "impresiones/", "taller-3d", "taller-3d/catalogo.json", "respaldos/2026-11-26_x",
+                     "ideas/2026-11-26_x", "impresiones/2026-11-26_esquinero_mi-creality-hi/producto", "../afuera",
+                     "impresiones/../taller-3d", str(self.pieza), "~/Documentos", "computer:///x",
+                     "impresiones/2026-11-24_no-existe", "impresiones/2026-11-25_enlace", "impresiones/sin-fecha"):
+            salida, error = srv.papelera({"carpeta": mala})
+            self.assertTrue(error, mala)
+            self.assertFalse(salida["borrado"], mala)
+        self.assertTrue(afuera.is_dir() and (self.raiz / "taller-3d" / "catalogo.json").is_file())
+        self.assertTrue(srv.papelera({"carpeta": "impresiones/2026-11-26_esquinero_mi-creality-hi", "otra": 1})[1])
+        salida, error = srv.papelera({"carpeta": "impresiones/2026-11-26_esquinero_mi-creality-hi/"})
+        self.assertFalse(error, salida)
+        self.assertEqual((salida["borrado"], salida["archivos"], salida["bytes"]), (True, 2, 5000))
+        self.assertFalse(self.pieza.exists())
+        papelera = self.datos / "Trash"
+        self.assertTrue((papelera / "files" / self.pieza.name / "producto" / "producto-1.jpg").is_file())
+        info = (papelera / "info" / f"{self.pieza.name}.trashinfo").read_text(encoding="utf-8")
+        self.assertIn("[Trash Info]", info)
+        self.assertIn("Path=" + str(self.pieza).replace(" ", "%20"), info)
+        self.assertRegex(info, r"DeletionDate=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+        self.assertIn("papelera", salida["mensaje"])
+        otra, error = srv.papelera({"carpeta": "impresiones/2026-11-26_esquinero_mi-creality-hi"})
+        self.assertTrue(error)                                          # ya no está
+        self.assertIn("No existe", otra["mensaje"])
+        self.pieza.mkdir()                                              # otra con el mismo nombre: no pisa la anterior
+        salida, error = srv.papelera({"carpeta": "impresiones/2026-11-26_esquinero_mi-creality-hi"})
+        self.assertFalse(error, salida)
+        self.assertTrue((papelera / "files" / f"{self.pieza.name}.2").is_dir())
+        self.assertTrue((papelera / "info" / f"{self.pieza.name}.2.trashinfo").is_file())
+        salida, error = srv.papelera({"carpeta": "disenos\\2026-11-20_tapa"})   # también con barra de Windows
+        self.assertFalse(error, salida)
+        self.assertFalse((self.raiz / "disenos" / "2026-11-20_tapa").exists())
+        sin_carpeta = self.ao.Servidor({"XDG_DATA_HOME": str(self.datos)})
+        self.assertTrue(sin_carpeta.papelera({"carpeta": "disenos/2026-11-20_tapa"})[1])
+
+    def test_protocolo_y_panel(self):
+        srv = self.ao.Servidor(self.entorno)
+        self.ao.procesar(srv, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                               "params": {"protocolVersion": "2025-06-18"}})
+        r = self.ao.procesar(srv, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        herramientas = {t["name"]: t["annotations"] for t in r["result"]["tools"]}
+        self.assertEqual(sorted(herramientas), ["abrir_en_orca", "mandar_a_la_papelera"])
+        self.assertTrue(herramientas["mandar_a_la_papelera"]["destructiveHint"])
+        self.assertFalse(herramientas["abrir_en_orca"]["destructiveHint"])
+        r = self.ao.procesar(srv, {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+            "name": "mandar_a_la_papelera", "arguments": {"carpeta": "impresiones/2026-11-26_esquinero_mi-creality-hi"}}})
+        self.assertTrue(r["result"]["structuredContent"]["borrado"])
+        r = self.ao.procesar(srv, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                                   "params": {"name": "borrar_todo", "arguments": {}}})
+        self.assertIn("error", r)
+        # El panel: «Borrar» en cada tarjeta, que le pide a Claude confirmar; quitar saca la pieza del índice
+        import catalogo
+        indice = {"version": 1, "piezas": [
+            {"carpeta": "impresiones/2026-11-26_esquinero_mi-creality-hi", "nombre": "Esquinero", "tipo": "impresion",
+             "fecha": "2026-11-26", "estado": "laminada", "archivos": ["e.gcode"], "id_tienda": 100071},
+            {"carpeta": "ideas/2026-11-26_soporte", "nombre": "Soporte", "tipo": "idea", "fecha": "2026-11-26",
+             "estado": "idea"}]}
+        ruta = self.tmp / "catalogo.json"
+        ruta.write_text(json.dumps(indice), encoding="utf-8")
+        for modo in ("archivo", "claude"):
+            r = subprocess.run([sys.executable, str(SCRIPTS / "catalogo.py"), "html", "--catalogo", str(ruta),
+                                "--modo", modo, "--salida", str(self.tmp / f"{modo}.html")], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            pagina = (self.tmp / f"{modo}.html").read_text(encoding="utf-8")
+            self.assertEqual(pagina.count('class="borrar"'), 2)
+            self.assertIn("quiero borrar «Esquinero» (impresiones/2026-11-26_esquinero_mi-creality-hi) con todo lo "
+                          "guardado", pagina)
+            self.assertIn("pedime confirmación", pagina)
+            self.assertIn("quiero borrar la idea «Soporte» (ideas/2026-11-26_soporte) del panel", pagina)
+        self.assertNotIn("mandar_a_la_papelera", pagina)                 # la página no borra: lo pide
+        r = subprocess.run([sys.executable, str(SCRIPTS / "catalogo.py"), "quitar", "--catalogo", str(ruta),
+                            "--carpeta", "impresiones/2026-11-26_esquinero_mi-creality-hi"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"quitada": True, "carpeta": "impresiones/2026-11-26_esquinero_mi-creality-hi",
+                                                "nombre": "Esquinero", "tipo": "impresion", "en_tienda": True})
+        self.assertEqual([p["carpeta"] for p in json.loads(ruta.read_text(encoding="utf-8"))["piezas"]],
+                         ["ideas/2026-11-26_soporte"])
+        r = subprocess.run([sys.executable, str(SCRIPTS / "catalogo.py"), "quitar", "--catalogo", str(ruta),
+                            "--carpeta", "impresiones/2026-11-01_otra"], capture_output=True, text=True)
+        self.assertFalse(json.loads(r.stdout)["quitada"])
+
+
 class TestGuardia(unittest.TestCase):
     def correr(self, modo, datos):
         return subprocess.run([sys.executable, str(RAIZ / "hooks" / "guardia.py"), modo],

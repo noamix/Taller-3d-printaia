@@ -32,6 +32,10 @@ Uso:
   python3 catalogo.py idea --catalogo catalogo.json --nombre "Soporte para la tele" [--nota "..."] [--impresora X]
   python3 catalogo.py quitar-idea --catalogo catalogo.json --carpeta ideas/2026-11-21_soporte-para-la-tele
 
+  # Sacar del panel una pieza (o idea) que el usuario borró con «Borrar», DESPUÉS de mandar su carpeta a la
+  # papelera (mandar_a_la_papelera de taller3d-orca) y de que el usuario lo confirmara en el chat
+  python3 catalogo.py quitar --catalogo catalogo.json --carpeta impresiones/2026-11-21_soporte_ender-3-v3-plus
+
   # Cuando una idea se hace pieza: agregar la pieza con --de-idea ideas/AAAA-MM-DD_nombre (la idea pasa a la pieza)
 
   # Anotar lo que dice la tienda (estado_productos del conector taller3d-tienda, guardado en estados.json):
@@ -397,6 +401,16 @@ def quitar_idea(catalogo: dict, carpeta: str) -> bool:
     return True
 
 
+def quitar(catalogo: dict, carpeta: str) -> dict | None:
+    """Saca una pieza o idea del panel (0.1.42, botón «Borrar»). Los archivos los manda a la papelera antes
+    mandar_a_la_papelera (taller3d-orca), con la confirmación del usuario: esto solo la saca del índice."""
+    carpeta = normalizar_carpeta(carpeta)
+    pieza = next((p for p in catalogo["piezas"] if p.get("carpeta") == carpeta), None)
+    if pieza is not None:
+        catalogo["piezas"].remove(pieza)
+    return pieza
+
+
 # La foto de la pieza impresa: foto.jpg (o foto-2.jpg…) en la carpeta de la pieza. Otras fotos (la de referencia
 # de una pieza generada desde una foto, por ejemplo) no la marcan como impresa.
 RE_FOTO_IMPRESA = re.compile(r"^foto(?:-\d+)?\.(?:jpe?g|png|webp)$")
@@ -471,6 +485,7 @@ def _en_una_linea(texto, largo: int = 80) -> str:
 
 ABRIR_EN_ORCA = "Abrila en Orca"
 PUBLICAR = "Publicar"
+BORRAR = "Borrar"
 # El botón de arriba del panel: las fotos no se pueden mandar desde la página, se adjuntan en el chat.
 PEDIDO_FOTO = "Quiero una pieza a partir de una foto: te la adjunto en el chat."
 # Otro botón de arriba: un STL que el usuario ya tiene (suyo o bajado) sigue el mismo circuito, sin modelar.
@@ -534,6 +549,16 @@ def acciones(p: dict) -> list[tuple[str, str]]:
     elif "impresa" in h:
         botones.append(("Revisá el precio", f"Desde el panel: revisá el precio de {cual}."))
     return botones
+
+
+def pedido_borrar(p: dict) -> str:
+    """El pedido del botón «Borrar» (0.1.42): Claude muestra qué se borra y pide confirmación antes de tocar nada."""
+    carpeta = _en_una_linea(p["carpeta"], 160)
+    nombre = _en_una_linea(p.get("nombre")) or carpeta
+    if p.get("tipo") == "idea" or p.get("estado") == "idea":
+        return f"Desde el panel: quiero borrar la idea «{nombre}» ({carpeta}) del panel. Pedime confirmación antes."
+    return (f"Desde el panel: quiero borrar «{nombre}» ({carpeta}) con todo lo guardado: su carpeta con todos los "
+            "archivos. Antes de borrar, mostrame qué se borra y pedime confirmación.")
 
 
 def _rutas_del_listado(listado) -> list[str]:
@@ -678,6 +703,8 @@ footer{max-width:1200px;margin:0 auto;padding:0 24px 32px;color:var(--suave);fon
 .acciones button:first-child,form.idea button{background:var(--tinta);color:#fff}
 .acciones button:disabled,form.idea button:disabled,.desde-foto button:disabled{opacity:.55;cursor:progress}
 .acciones .solo-claude{display:none}
+.acciones button.borrar{margin-left:auto;border-color:#B3261E;color:#B3261E;background:#fff}
+.acciones button.borrar:hover{background:#FCEEEE}
 .acciones a.boton{display:inline-flex;align-items:center;min-height:40px;padding:6px 12px;border:1.5px solid var(--tinta);border-radius:999px;background:#fff;color:var(--tinta);font-size:14px;text-decoration:none}
 .acciones a.boton:first-child{background:var(--tinta);color:#fff}
 .estado-publi{margin:0;font-size:14px;font-weight:600}
@@ -954,6 +981,8 @@ def _tarjeta(p: dict, modo: str = "archivo", imagenes: dict | None = None) -> st
                          or etiqueta == PUBLICAR and "laminada" not in h and not publicacion else "")
                       + f'>{e(etiqueta)}</button>' for etiqueta, pedido in acciones(p))
     botones += '<button type="button" class="solo-claude" data-comentar>Otra cosa…</button>'
+    # «Borrar» (0.1.42): no borra desde la página; le pide a Claude, que muestra qué se borra y pide confirmación.
+    botones += f'<button type="button" class="borrar" data-pedido="{e(pedido_borrar(p))}">{BORRAR}</button>'
     fecha = p.get("fecha") or ""
     texto = " ".join(str(x) for x in (nombre, p.get("material"), p.get("color"), p.get("impresora"), p.get("nota"),
                                       carpeta) if x).lower()
@@ -1299,6 +1328,10 @@ def main(argv=None) -> None:
     i.add_argument("--impresora")
     i.add_argument("--fecha", help="AAAA-MM-DD (si no, hoy)")
 
+    qp = sub.add_parser("quitar", help="saca del panel una pieza o idea que el usuario borró (después de la papelera)")
+    qp.add_argument("--catalogo", required=True, type=Path)
+    qp.add_argument("--carpeta", required=True, help="la carpeta de la pieza o idea")
+
     q = sub.add_parser("quitar-idea", help="saca una idea que el usuario descartó")
     q.add_argument("--catalogo", required=True, type=Path)
     q.add_argument("--carpeta", required=True, help="ideas/AAAA-MM-DD_nombre")
@@ -1396,6 +1429,13 @@ def main(argv=None) -> None:
         idea = agregar_idea(catalogo, args.nombre, args.nota, args.impresora, args.fecha)
         guardar(args.catalogo, catalogo)
         print(json.dumps({"carpeta": idea["carpeta"], "nombre": idea["nombre"]}, ensure_ascii=False))
+    elif args.accion == "quitar":
+        quitada = quitar(catalogo, args.carpeta)
+        if quitada is not None:
+            guardar(args.catalogo, catalogo)
+        print(json.dumps({"quitada": quitada is not None, "carpeta": normalizar_carpeta(args.carpeta),
+                          "nombre": (quitada or {}).get("nombre"), "tipo": (quitada or {}).get("tipo"),
+                          "en_tienda": bool((quitada or {}).get("id_tienda"))}, ensure_ascii=False))
     elif args.accion == "quitar-idea":
         quitada = quitar_idea(catalogo, args.carpeta)
         guardar(args.catalogo, catalogo)

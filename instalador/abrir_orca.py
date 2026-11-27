@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2026 Leo y colaboradores de taller-3d
-"""taller3d-orca: servidor MCP local (stdio, solo biblioteca estándar) con una sola herramienta, abrir_en_orca.
+"""taller3d-orca: servidor MCP local (stdio, solo biblioteca estándar) del taller, con dos herramientas.
 
-Abre en la ventana de OrcaSlicer un proyecto .3mf que esté dentro de la carpeta de trabajo del taller.
-Solo eso: no lamina, no imprime, no manda nada a la impresora, no escribe ni borra archivos.
+  abrir_en_orca(ruta)            abre en la ventana de OrcaSlicer un proyecto .3mf que esté dentro de la carpeta de
+                                 trabajo del taller. No lamina, no imprime, no manda nada a la impresora, no escribe
+                                 ni borra archivos.
+  mandar_a_la_papelera(carpeta)  manda a la papelera de la PC (se recupera desde ahí hasta que se vacía) la carpeta
+                                 entera de una pieza: impresiones/AAAA-MM-DD_nombre o disenos/AAAA-MM-DD_nombre, y
+                                 nada más. Claude la usa solo después de que el usuario confirmó en el chat, viendo qué
+                                 se borra. Nunca borra para siempre.
 
 Lo arranca la app de escritorio de Claude (entrada "taller3d-orca" de claude_desktop_config.json, que escribe el
 instalador). La configuración sale solo de esa entrada, nunca de la herramienta ni de archivos que Claude pueda
@@ -31,11 +36,12 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import zipfile
 
 NOMBRE = "taller3d-orca"
-VERSION = "0.1.0"
-INFO = {"name": NOMBRE, "title": "Taller 3D: abrir en OrcaSlicer", "version": VERSION}
+VERSION = "0.2.0"
+INFO = {"name": NOMBRE, "title": "Taller 3D: abrir en OrcaSlicer y mandar piezas a la papelera", "version": VERSION}
 VERSIONES_MODERNAS = ("2026-07-28",)
 VERSIONES_LEGADAS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 META_VERSION = "io.modelcontextprotocol/protocolVersion"
@@ -51,10 +57,14 @@ MAX_PARTES = 20000
 MAX_CONFIG = 8 * 1024 * 1024
 
 INSTRUCCIONES = (
-    "Servidor local del taller 3D (plugin taller-3d). Su única herramienta, abrir_en_orca, abre en la ventana de "
-    "OrcaSlicer un proyecto .3mf de la carpeta de trabajo del taller. Usala cuando el usuario pida ver o abrir una "
-    "pieza en Orca, también cuando el pedido llega desde el panel. Solo abre la ventana: imprimir es siempre del "
-    "usuario; nunca uses la pestaña Dispositivo de Orca ni sus botones Imprimir o Enviar.")
+    "Servidor local del taller 3D (plugin taller-3d). abrir_en_orca abre en la ventana de OrcaSlicer un proyecto .3mf "
+    "de la carpeta de trabajo del taller: usala cuando el usuario pida ver o abrir una pieza en Orca, también cuando "
+    "el pedido llega desde el panel. Solo abre la ventana: imprimir es siempre del usuario; nunca uses la pestaña "
+    "Dispositivo de Orca ni sus botones Imprimir o Enviar. mandar_a_la_papelera manda a la papelera de la PC la "
+    "carpeta entera de una pieza (impresiones/… o disenos/…): usala SOLO después de mostrarle al usuario qué se borra "
+    "(cuántos archivos y cuánto ocupa, y si está en la tienda) y de que confirme en el chat. Nunca borra para siempre "
+    "ni toca nada fuera de esa carpeta.")
+MAX_ARCHIVOS_CONTADOS = 100000
 
 HERRAMIENTA = {
     "name": "abrir_en_orca",
@@ -88,6 +98,42 @@ HERRAMIENTA = {
     "annotations": {"title": "Abrir en OrcaSlicer", "readOnlyHint": False, "destructiveHint": False,
                     "idempotentHint": False, "openWorldHint": False},
 }
+
+PAPELERA = {
+    "name": "mandar_a_la_papelera",
+    "title": "Mandar una pieza a la papelera",
+    "description": (
+        "Manda a la papelera de la PC del usuario la carpeta entera de una pieza del taller 3D, con todo lo que tiene "
+        "adentro (modelo, G-code, proyecto de Orca, fotos, publicación). Se puede recuperar desde la papelera hasta "
+        "que el usuario la vacíe: nunca borra para siempre. Usala SOLO después de que el usuario confirmó en el chat "
+        "que quiere borrar esa pieza, viendo qué se borra. No toca nada fuera de esa carpeta, ni la tienda. "
+        "`carpeta`: relativa a la carpeta de trabajo, impresiones/AAAA-MM-DD_nombre o disenos/AAAA-MM-DD_nombre."),
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "carpeta": {"type": "string", "minLength": 1, "maxLength": MAX_RUTA,
+                        "description": "La carpeta de la pieza, relativa a la carpeta de trabajo."},
+        },
+        "required": ["carpeta"],
+        "additionalProperties": False,
+    },
+    "outputSchema": {
+        "type": "object",
+        "properties": {
+            "borrado": {"type": "boolean", "description": "Si la carpeta quedó en la papelera."},
+            "mensaje": {"type": "string", "description": "Qué pasó, para mostrarle al usuario."},
+            "carpeta": {"type": "string"},
+            "archivos": {"type": "integer", "description": "Cuántos archivos tenía."},
+            "bytes": {"type": "integer", "description": "Cuánto ocupaba."},
+            "papelera": {"type": "string", "description": "A qué papelera fue."},
+        },
+        "required": ["borrado", "mensaje"],
+    },
+    # Mueve archivos a la papelera: destructivo (la app puede pedir confirmación), aunque se recupera desde ahí.
+    "annotations": {"title": "Mandar a la papelera", "readOnlyHint": False, "destructiveHint": True,
+                    "idempotentHint": False, "openWorldHint": False},
+}
+HERRAMIENTAS = [HERRAMIENTA, PAPELERA]
 
 
 class Rechazo(Exception):
@@ -230,8 +276,8 @@ def revisar_3mf(ruta: str) -> None:
 
 # --- Configuración ----------------------------------------------------------------------------------------------
 
-def configuracion(entorno) -> tuple[str, list[str]]:
-    """Carpeta de trabajo (resuelta) y comando de Orca, de la entrada de la app. Rechazo si algo no cierra."""
+def carpeta_de_trabajo(entorno) -> str:
+    """La carpeta de trabajo (resuelta), de la entrada de la app. Rechazo si algo no cierra."""
     carpeta = entorno.get("TALLER3D_CARPETA", "")
     if not carpeta or not os.path.isabs(carpeta):
         raise Rechazo("Falta configurar la carpeta de trabajo (TALLER3D_CARPETA, ruta completa) en la entrada "
@@ -242,6 +288,12 @@ def configuracion(entorno) -> tuple[str, list[str]]:
     casa = os.path.realpath(os.path.expanduser("~"))
     if os.path.normcase(raiz) == os.path.normcase(casa) or os.path.dirname(raiz) == raiz:
         raise Rechazo("La carpeta de trabajo no puede ser tu carpeta personal entera ni la raíz del disco.")
+    return raiz
+
+
+def configuracion(entorno) -> tuple[str, list[str]]:
+    """Carpeta de trabajo (resuelta) y comando de Orca, de la entrada de la app. Rechazo si algo no cierra."""
+    raiz = carpeta_de_trabajo(entorno)
     try:
         comando = json.loads(entorno.get("TALLER3D_ORCA", ""))
     except ValueError:
@@ -420,6 +472,147 @@ def lanzar(comando: list[str], ruta: str, entorno) -> dict:
 
 # --- La herramienta ---------------------------------------------------------------------------------------------
 
+# --- Mandar una pieza a la papelera ----------------------------------------------------------------------------
+
+CARPETAS_DE_PIEZAS = ("impresiones", "disenos")
+RE_PIEZA = re.compile(r"^\d{4}-\d{2}-\d{2}_[^\\/:]+$")
+
+
+def validar_pieza(pedida, raiz: str) -> str:
+    """La ruta real de la carpeta de una pieza (impresiones/… o disenos/…, un nivel adentro); si no, Rechazo."""
+    uso = ("Solo mando a la papelera la carpeta de una pieza, relativa a la carpeta de trabajo: "
+           "impresiones/AAAA-MM-DD_nombre o disenos/AAAA-MM-DD_nombre.")
+    if not isinstance(pedida, str) or not pedida.strip():
+        raise Rechazo("Falta `carpeta`. " + uso)
+    if len(pedida) > MAX_RUTA or _con_control(pedida):
+        raise Rechazo("La carpeta es demasiado larga o tiene caracteres de control.")
+    texto = pedida.strip()
+    if "://" in texto or texto.startswith(("~", "/", "\\")) or re.match(r"^[A-Za-z]:", texto):
+        raise Rechazo(uso)
+    partes = texto.replace("\\", "/").strip("/").split("/")
+    if len(partes) != 2 or partes[0] not in CARPETAS_DE_PIEZAS or not RE_PIEZA.match(partes[1]) \
+            or partes[1].endswith((".", " ")):
+        raise Rechazo(uso)
+    padre = os.path.join(raiz, partes[0])
+    candidato = os.path.join(padre, partes[1])
+    if os.path.islink(padre) or os.path.islink(candidato):
+        raise Rechazo("Esa carpeta es un enlace: no la toco. Borrala a mano si querés.")
+    real = os.path.realpath(candidato)
+    if os.path.normcase(os.path.dirname(real)) != os.path.normcase(os.path.realpath(padre)) \
+            or not dentro_de(real, raiz):
+        raise Rechazo(uso)
+    if not os.path.isdir(real):
+        raise Rechazo(f"No existe la carpeta {partes[0]}/{partes[1]} en el taller (¿ya estaba borrada?).")
+    return real
+
+
+def contar(real: str) -> tuple[int, int]:
+    """Cuántos archivos tiene la carpeta y cuánto ocupan (sin seguir enlaces)."""
+    archivos = peso = 0
+    for raiz, carpetas, nombres in os.walk(real, followlinks=False):
+        for nombre in nombres + [c for c in carpetas if os.path.islink(os.path.join(raiz, c))]:
+            archivos += 1
+            try:
+                peso += os.lstat(os.path.join(raiz, nombre)).st_size
+            except OSError:
+                pass
+            if archivos >= MAX_ARCHIVOS_CONTADOS:
+                return archivos, peso
+    return archivos, peso
+
+
+def _nombre_libre(carpeta: str, base: str, sufijo: str = "") -> str:
+    nombre, n = base, 1
+    while os.path.lexists(os.path.join(carpeta, nombre + sufijo)):
+        n += 1
+        nombre = f"{base}.{n}"
+    return nombre
+
+
+def _papelera_freedesktop(real: str, entorno) -> str:
+    """La papelera del usuario según freedesktop.org (la misma del explorador de archivos): ~/.local/share/Trash."""
+    casa = os.path.expanduser("~")
+    datos = entorno.get("XDG_DATA_HOME") or ""
+    if not os.path.isabs(datos):
+        datos = os.path.join(casa, ".local", "share")
+    papelera = os.path.join(datos, "Trash")
+    archivos, info = os.path.join(papelera, "files"), os.path.join(papelera, "info")
+    os.makedirs(archivos, mode=0o700, exist_ok=True)
+    os.makedirs(info, mode=0o700, exist_ok=True)
+    base = os.path.basename(real)
+    while True:
+        nombre = _nombre_libre(archivos, base)
+        ruta_info = os.path.join(info, nombre + ".trashinfo")
+        try:
+            fd = os.open(ruta_info, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            break
+        except FileExistsError:
+            base = nombre + ".x"
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(f"[Trash Info]\nPath={urllib.parse.quote(real)}\nDeletionDate={time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
+    try:
+        os.rename(real, os.path.join(archivos, nombre))
+    except OSError as error:
+        try:
+            os.unlink(ruta_info)
+        except OSError:
+            pass
+        raise Rechazo(f"No pude mandarla a la papelera ({error.strerror or error}): puede que esté en otro disco. "
+                      "Borrala a mano desde el explorador de archivos.") from None
+    return papelera
+
+
+def _papelera_mac(real: str) -> str:
+    papelera = os.path.join(os.path.expanduser("~"), ".Trash")
+    destino = os.path.join(papelera, _nombre_libre(papelera, os.path.basename(real)))
+    try:
+        os.rename(real, destino)
+    except OSError as error:
+        raise Rechazo(f"No pude mandarla a la papelera ({error.strerror or error}): borrala a mano desde el Finder.") from None
+    return papelera
+
+
+def _papelera_windows(real: str) -> str:
+    """La papelera de reciclaje, con SHFileOperationW y FOF_ALLOWUNDO. Sin probar en una PC con Windows."""
+    import ctypes
+    from ctypes import wintypes
+
+    class Operacion(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", wintypes.UINT), ("pFrom", wintypes.LPCWSTR),
+                    ("pTo", wintypes.LPCWSTR), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", wintypes.LPCWSTR)]
+    borrar, silencio, sin_preguntar, deshacer, sin_errores = 3, 0x4, 0x10, 0x40, 0x400
+    op = Operacion(None, borrar, real + "\0", None, deshacer | sin_preguntar | silencio | sin_errores, False, None,
+                   None)
+    if ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) != 0 or op.fAnyOperationsAborted:  # type: ignore[attr-defined]
+        raise Rechazo("No pude mandarla a la papelera de reciclaje: borrala a mano desde el Explorador de archivos.")
+    return "Papelera de reciclaje"
+
+
+def a_la_papelera(real: str, entorno) -> str:
+    """Manda la carpeta a la papelera del sistema; devuelve a cuál. Nunca borra para siempre."""
+    if os.name == "nt":
+        return _papelera_windows(real)
+    if sys.platform == "darwin":
+        return _papelera_mac(real)
+    gio = _buscar("gio", entorno)                           # GNOME y otros: conoce también las papeleras de otros discos
+    if gio:
+        try:
+            r = subprocess.run([gio, "trash", "--", real], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.PIPE, timeout=120)
+            if r.returncode == 0 and not os.path.lexists(real):
+                return "papelera de la PC (gio)"
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return _papelera_freedesktop(real, entorno)
+
+
+def _peso(bytes_: int) -> str:
+    if bytes_ >= 1024 * 1024:
+        return f"{bytes_ / (1024 * 1024):.1f} MB".replace(".", ",")
+    return f"{max(1, round(bytes_ / 1024))} KB" if bytes_ else "0 KB"
+
+
 class Servidor:
     def __init__(self, entorno=None):
         self.entorno = dict(os.environ if entorno is None else entorno)
@@ -468,6 +661,29 @@ class Servidor:
         except Rechazo as motivo:
             registrar(f"rechazado: {pedida!r}: {motivo}")
             return {"abierto": False, "mensaje": str(motivo)}, True
+
+
+    def papelera(self, argumentos: dict) -> tuple[dict, bool]:
+        """(structuredContent, isError). Solo después de que el usuario confirmó en el chat."""
+        pedida = argumentos.get("carpeta")
+        try:
+            extra = sorted(set(argumentos) - {"carpeta"})
+            if extra:
+                raise Rechazo(f"Solo acepto `carpeta` (sobra: {', '.join(map(str, extra))}).")
+            raiz = carpeta_de_trabajo(self.entorno)
+            real = validar_pieza(pedida, raiz)
+            relativa = os.path.relpath(real, raiz).replace(os.sep, "/")
+            archivos, peso = contar(real)
+            donde = a_la_papelera(real, self.entorno)
+            if os.path.lexists(real):
+                raise Rechazo("La carpeta sigue en su lugar: no se pudo mandar a la papelera. Borrala a mano.")
+            registrar(f"a la papelera: {relativa} ({archivos} archivos, {peso} bytes) → {donde}")
+            return {"borrado": True, "carpeta": relativa, "archivos": archivos, "bytes": peso, "papelera": donde,
+                    "mensaje": f"Listo: mandé {relativa} a la papelera de tu PC ({archivos} archivos, {_peso(peso)}). "
+                               "Si te arrepentís, la recuperás desde la papelera hasta que la vacíes."}, False
+        except Rechazo as motivo:
+            registrar(f"papelera rechazada: {pedida!r}: {motivo}")
+            return {"borrado": False, "mensaje": str(motivo)}, True
 
 
 def _error(ident, codigo: int, mensaje: str, datos=None) -> dict:
@@ -536,19 +752,22 @@ def _atender(servidor: Servidor, ident, metodo: str, params: dict, moderno: bool
     elif metodo == "ping":
         resultado = {}
     elif metodo == "tools/list":
-        resultado = {"tools": [HERRAMIENTA]}
+        resultado = {"tools": HERRAMIENTAS}
     elif metodo in ("resources/list", "resources/templates/list", "prompts/list"):
         resultado = {{"resources/list": "resources", "resources/templates/list": "resourceTemplates",
                       "prompts/list": "prompts"}[metodo]: []}
     elif metodo == "tools/call":
         nombre, argumentos = params.get("name"), params.get("arguments")
-        if nombre != HERRAMIENTA["name"]:
+        if nombre not in (HERRAMIENTA["name"], PAPELERA["name"]):
             return _error(ident, -32602, f"Unknown tool: {nombre}")
         if argumentos is None:
             argumentos = {}
         if not isinstance(argumentos, dict):
             return _error(ident, -32602, "Invalid params: arguments tiene que ser un objeto")
-        resultado = _resultado_herramienta(*servidor.abrir(argumentos))
+        if nombre == PAPELERA["name"]:
+            resultado = _resultado_herramienta(*servidor.papelera(argumentos))
+        else:
+            resultado = _resultado_herramienta(*servidor.abrir(argumentos))
     else:
         return _error(ident, -32601, f"Method not found: {metodo}")
     if moderno:

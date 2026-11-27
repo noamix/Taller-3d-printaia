@@ -1,5 +1,16 @@
 # Cambios
 
+## 0.1.42 (27/11/2026)
+
+**Botón «Borrar» en el panel, con confirmación.** Pedido de Leo: «tendríamos que tener un botón de borrar y que antes de hacerlo pida confirmación para borrar modelos completos incluido todo lo guardado».
+
+- **Panel:** cada tarjeta tiene «Borrar» (en rojo, a la derecha de los botones). No borra desde la página: le pide a Claude que borre la pieza con todo lo guardado, o la idea, y que antes muestre qué se borra y pida confirmación. En el archivo, copia el pedido como los demás botones.
+- **`mandar_a_la_papelera(carpeta)`** (servidor local `taller3d-orca`, que pasa a la versión 0.2.0): manda a la papelera de la PC la carpeta entera de una pieza, y solo eso: `impresiones/AAAA-MM-DD_…` o `disenos/AAAA-MM-DD_…` de la carpeta de trabajo, un nivel adentro. Rechaza otras rutas, `..`, rutas absolutas y enlaces. Nunca borra para siempre: en Linux usa `gio trash` y, si no está, la papelera de freedesktop (`~/.local/share/Trash`, con su `.trashinfo`, sin pisar otra del mismo nombre); en macOS, `~/.Trash`; en Windows, la papelera de reciclaje (sin probar todavía, y el servidor por ahora se instala solo en Linux). La app de Claude la ve como destructiva. El panel no la puede usar: la usa Claude, después de la confirmación.
+- **La confirmación** (skill `panel`, «Borrar una pieza o una idea»): Claude lista la carpeta (cuántos archivos y cuánto ocupa), mira si la pieza está en la tienda y pregunta «Sí, borrala» / «No, dejala». Si está en la tienda, avisa que el producto no se toca y, si está publicado, que cuando se lo compren no va a tener el G-code. Con el sí, la manda a la papelera, la saca del panel (`catalogo.py quitar`, nuevo: también para ideas), rehace el panel y lo anota en el historial. Sin la herramienta, da el enlace a la carpeta para borrarla a mano.
+- `MANUAL.md`, `SECURITY.md`, las skills `panel` e `impresion-3d` y `references/panel-al-costado.md` lo explican.
+- 2 pruebas nuevas (128 en total, 1 se saltea): la papelera con rutas malas (vacía, la carpeta de piezas entera, `taller-3d`, `respaldos`, una subcarpeta, `..`, absolutas, `~`, enlaces, inexistentes), la carpeta y su `.trashinfo`, dos con el mismo nombre, la barra de Windows, el protocolo (destructiva), el botón en las dos páginas y `quitar`.
+- **Para tenerlo:** además de actualizar el plugin, el servidor local nuevo queda en `taller-3d/instalador/abrir_orca.py`; en Linux, `install -m 0644 "<tu carpeta de trabajo>/taller-3d/instalador/abrir_orca.py" ~/.local/share/taller-3d/abrir_orca.py` (o el instalador de nuevo) y reiniciá la app de Claude.
+
 ## 0.1.41 (26/11/2026)
 
 **El panel se entera solo de lo que publicás en tu tienda.** Pregunta de Leo: «¿cuándo verificás si está publicado o si está en borrador?». Hasta ahora, solo al cargar el borrador o cuando él lo contaba; los esquineros decorativos y el anclaje figuraban en borrador horas después de publicados.
