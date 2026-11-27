@@ -14,6 +14,9 @@ Herramientas:
   cambiar_categorias(carpeta)  le pone a un producto que ya está en la tienda (también uno publicado, con el OK del
                             usuario) las categorías de su publicación. No cambia nada más: ni el estado, ni el texto,
                             ni el precio, ni las fotos.
+  estado_productos(ids)     en qué estado está cada producto del taller en la tienda (borrador, publicado, en la
+                            papelera, borrado...). Sin ids, los que tiene anotados el panel (taller-3d/catalogo.json).
+                            No cambia nada.
 
 Nunca publica, no borra, no toca pedidos, clientes ni otros productos. Categorías nuevas, solo con crear_categoria. Habla solo con la tienda guardada (https) y no
 sigue redirecciones (no le manda la contraseña a otro sitio).
@@ -52,7 +55,7 @@ import urllib.parse
 import urllib.request
 
 NOMBRE = "taller3d-tienda"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 INFO = {"name": NOMBRE, "title": "Taller 3D: cargar en la tienda", "version": VERSION}
 VERSIONES_MODERNAS = ("2026-07-28",)
 VERSIONES_LEGADAS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
@@ -64,6 +67,9 @@ ARCHIVO_CREDENCIALES = "credenciales-tienda.json"
 ESTADO = "tienda.json"                 # en <pieza>/producto/
 MAX_RUTA = 1024
 MAX_PUBLICACION = 2 * 1024 * 1024
+MAX_CATALOGO = 8 * 1024 * 1024
+MAX_IDS = 100
+CATALOGO = os.path.join("taller-3d", "catalogo.json")   # el panel, en la carpeta de trabajo
 MAX_CREDENCIALES = 64 * 1024
 MAX_FOTO = 15 * 1024 * 1024
 MAX_FOTOS = 10
@@ -73,6 +79,8 @@ REPETIDO_S = 20.0
 TIPOS_FOTO = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 ESTADOS = {"draft": "borrador", "publish": "publicado", "pending": "pendiente de revisión", "private": "privado",
            "future": "programado"}
+EN_LA_PAPELERA, BORRADO = "trash", "borrado"           # «borrado»: la tienda ya no lo tiene (no es un estado de WooCommerce)
+ESTADOS_TODOS = {**ESTADOS, EN_LA_PAPELERA: "en la papelera", BORRADO: "borrado"}
 
 
 def como_reconectar() -> str:
@@ -98,8 +106,10 @@ INSTRUCCIONES = (
     "publicación en su tienda, también desde el panel. estado_tienda dice si la tienda está conectada. "
     "categorias_tienda da las categorías que ya tiene la tienda: elegí entre ellas las de cada producto antes de "
     "armar la publicación. crear_categoria crea una nueva solo si el usuario la aprobó. cambiar_categorias cambia solo "
-    "las categorías de un producto que ya está en la tienda (si está publicado, solo con el OK del usuario). Nunca "
-    "publica: publicar es siempre del usuario, desde su tienda.")
+    "las categorías de un producto que ya está en la tienda (si está publicado, solo con el OK del usuario). "
+    "estado_productos dice si los productos del panel siguen en borrador, ya están publicados o se borraron, sin "
+    "cambiar nada: usala al empezar a trabajar con el taller y antes de rehacer el panel. Nunca publica: publicar es "
+    "siempre del usuario, desde su tienda.")
 
 HERRAMIENTAS = [
     {
@@ -244,6 +254,45 @@ HERRAMIENTAS = [
             "required": ["cambiado", "mensaje"],
         },
         "annotations": {"title": "Cambiar categorías", "readOnlyHint": False, "destructiveHint": False,
+                        "idempotentHint": True, "openWorldHint": True},
+    },
+    {
+        "name": "estado_productos",
+        "title": "Ver si los productos del taller están publicados",
+        "description": ("Dice en qué estado está cada producto del taller en la tienda WooCommerce del usuario: "
+                        "borrador, publicado, pendiente de revisión, privado, programado, en la papelera o borrado. "
+                        "Sin `ids`, revisa los productos que tiene anotados el panel del taller "
+                        "(taller-3d/catalogo.json de la carpeta de trabajo) y dice de qué pieza es cada uno. "
+                        "No cambia nada."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ids": {"type": "array", "items": {"type": "integer", "minimum": 1}, "maxItems": MAX_IDS,
+                        "description": "Opcional: los números de los productos. Sin esto, los del panel."},
+            },
+            "additionalProperties": False,
+        },
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "productos": {"type": "array", "items": {"type": "object", "properties": {
+                    "id": {"type": "integer"},
+                    "carpeta": {"type": ["string", "null"], "description": "La pieza del panel (sin ids)."},
+                    "nombre": {"type": "string"},
+                    "estado": {"type": "string", "description": "borrador, publicado, ..., en la papelera, borrado"},
+                    "status": {"type": "string", "description": "El de WooCommerce (draft, publish...) o «borrado»."},
+                    "tipo": {"type": "string", "description": "simple, variable..."},
+                    "precio": {"type": "string"},
+                    "enlace": {"type": ["string", "null"], "description": "La página del producto, si está publicado."},
+                    "enlace_admin": {"type": "string"},
+                    "modificado": {"type": ["string", "null"]}}}},
+                "resumen": {"type": "object", "description": "Cuántos hay en cada estado."},
+                "tienda": {"type": "string"},
+                "mensaje": {"type": "string"},
+            },
+            "required": ["productos", "mensaje"],
+        },
+        "annotations": {"title": "Estado de los productos", "readOnlyHint": True, "destructiveHint": False,
                         "idempotentHint": True, "openWorldHint": True},
     },
 ]
@@ -589,6 +638,78 @@ def buscar_existente(tienda: Tienda, sku: str, id_previo) -> dict | None:
             return p
     _, lista = tienda.pedir("GET", "/wc/v3/products", params={"sku": sku, "status": "any", "per_page": 10})
     return next((p for p in _lista(lista) if p.get("sku") == sku and p.get("status") != "trash"), None)
+
+
+def _numero_de_producto(valor) -> int | None:
+    """El número de un producto: entero positivo (o texto con solo dígitos, como lo guarda a veces el panel)."""
+    if isinstance(valor, bool):
+        return None
+    if isinstance(valor, str) and valor.strip().isdigit():
+        valor = int(valor.strip())
+    return valor if isinstance(valor, int) and 0 < valor < 2 ** 63 else None
+
+
+def ids_del_panel(raiz: str) -> list[tuple[int, str]]:
+    """Los productos que tiene anotados el panel (id_tienda de cada pieza), con la carpeta de la pieza."""
+    ruta = os.path.join(raiz, CATALOGO)
+    if os.path.islink(ruta) or not dentro_de(os.path.realpath(ruta), raiz) or not os.path.isfile(ruta):
+        raise Rechazo("No encontré el panel del taller (taller-3d/catalogo.json) en la carpeta de trabajo.")
+    datos = _leer_json(ruta, MAX_CATALOGO, "catalogo.json")
+    piezas = datos.get("piezas") if isinstance(datos, dict) else None
+    if not isinstance(piezas, list):
+        raise Rechazo("taller-3d/catalogo.json no tiene el formato del panel.")
+    vistos: dict[int, str] = {}
+    for p in piezas:
+        if not isinstance(p, dict):
+            continue
+        pid = _numero_de_producto(p.get("id_tienda"))
+        carpeta = p.get("carpeta")
+        if pid and pid not in vistos:
+            vistos[pid] = carpeta if isinstance(carpeta, str) and not _con_control(carpeta) else ""
+    return list(vistos.items())
+
+
+def estados_de(tienda: Tienda, ids: list[int]) -> dict[int, dict]:
+    """El estado de cada producto en la tienda. Los que no aparecen se buscan uno por uno: en la papelera la tienda
+    todavía los da; si no los da, están borrados."""
+    vistos: dict[int, dict] = {}
+    campos = "id,name,status,type,price,permalink,date_modified"
+    for i in range(0, len(ids), MAX_IDS):
+        bloque = ids[i:i + MAX_IDS]
+        _, lista = tienda.pedir("GET", "/wc/v3/products", params={
+            "include": ",".join(map(str, bloque)), "status": "any", "per_page": MAX_IDS, "_fields": campos})
+        for p in _lista(lista):
+            if p.get("id") in bloque:
+                vistos[p["id"]] = p
+    for pid in ids:
+        if pid not in vistos:
+            codigo, p = tienda.pedir("GET", f"/wc/v3/products/{pid}", params={"_fields": campos}, admitir=(404, 410))
+            vistos[pid] = p if codigo == 200 and isinstance(p, dict) and p.get("id") == pid else {"status": BORRADO}
+    return vistos
+
+
+def describir_producto(tienda: Tienda, pid: int, p: dict, carpeta: str | None) -> dict:
+    status = str(p.get("status") or "")
+    enlace = p.get("permalink") if status == "publish" and isinstance(p.get("permalink"), str) else None
+    if enlace and not (enlace.startswith(tienda.base + "/") or enlace == tienda.base):
+        enlace = None                                    # solo enlaces de la misma tienda
+    modificado = p.get("date_modified")
+    return {"id": pid, "carpeta": carpeta, "nombre": _limpio(p.get("name"), 200),
+            "estado": ESTADOS_TODOS.get(status, status or "desconocido"), "status": status,
+            "tipo": str(p.get("type") or ""), "precio": str(p.get("price") or ""),
+            "enlace": enlace, "enlace_admin": tienda.enlace_admin(pid),
+            "modificado": modificado if isinstance(modificado, str) else None}
+
+
+def resumir_estados(productos: list[dict]) -> tuple[dict, str]:
+    cuenta: dict[str, int] = {}
+    for x in productos:
+        cuenta[x["estado"]] = cuenta.get(x["estado"], 0) + 1
+    plurales = {"borrador": "borradores", "publicado": "publicados", "privado": "privados",
+                "programado": "programados", "borrado": "borrados", "pendiente de revisión": "pendientes de revisión"}
+    partes = [f"{n} {plurales.get(e, e) if n > 1 else e}" for e, n in sorted(cuenta.items(), key=lambda x: -x[1])]
+    texto = partes[0] if len(partes) == 1 else ", ".join(partes[:-1]) + " y " + partes[-1] if partes else ""
+    return cuenta, texto
 
 
 def _mismo_nombre(a, b: str) -> bool:
@@ -937,6 +1058,35 @@ class Servidor:
             registrar(f"categorías rechazadas: {pedida!r}: {motivo}")
             return {"cambiado": False, "mensaje": str(motivo)}, True
 
+    def productos(self, argumentos: dict) -> tuple[dict, bool]:
+        """En qué estado están los productos en la tienda. Solo lee."""
+        try:
+            extra = sorted(set(argumentos) - {"ids"})
+            if extra:
+                raise Rechazo(f"Solo acepto `ids` (sobra: {', '.join(map(str, extra))}).")
+            if "ids" in argumentos:
+                pedidos = argumentos["ids"]
+                if not isinstance(pedidos, list) or not pedidos or len(pedidos) > MAX_IDS:
+                    raise Rechazo(f"`ids` tiene que ser una lista de 1 a {MAX_IDS} números de producto.")
+                ids = [_numero_de_producto(x) if isinstance(x, int) else None for x in pedidos]
+                if None in ids:
+                    raise Rechazo("Los números de producto tienen que ser enteros positivos.")
+                lista = [(pid, None) for pid in dict.fromkeys(ids)]
+            else:
+                lista = ids_del_panel(carpeta_de_trabajo(self.entorno))
+            tienda = self.tienda()
+            if not lista:
+                return {"productos": [], "resumen": {}, "tienda": tienda.base,
+                        "mensaje": "El panel todavía no tiene productos cargados en la tienda."}, False
+            vistos = estados_de(tienda, [pid for pid, _ in lista])
+            productos = [describir_producto(tienda, pid, vistos[pid], carpeta) for pid, carpeta in lista]
+            cuenta, texto = resumir_estados(productos)
+            registrar(f"estados: {len(productos)} productos ({texto})")
+            return {"productos": productos, "resumen": cuenta, "tienda": tienda.base,
+                    "mensaje": f"En tu tienda: {texto}. No cambié nada."}, False
+        except Rechazo as motivo:
+            return {"productos": [], "mensaje": str(motivo)}, True
+
     def estado(self, argumentos: dict) -> tuple[dict, bool]:
         try:
             if argumentos:
@@ -1037,6 +1187,8 @@ def _atender(servidor: Servidor, ident, metodo: str, params: dict, moderno: bool
             resultado = _resultado_herramienta(*servidor.crear_categoria(argumentos))
         elif nombre == "cambiar_categorias":
             resultado = _resultado_herramienta(*servidor.cambiar_categorias(argumentos))
+        elif nombre == "estado_productos":
+            resultado = _resultado_herramienta(*servidor.productos(argumentos))
         else:
             return _error(ident, -32602, f"Unknown tool: {nombre}")
     else:

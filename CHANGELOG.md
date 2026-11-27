@@ -1,5 +1,26 @@
 # Cambios
 
+## 0.1.41 (26/11/2026)
+
+**El panel se entera solo de lo que publicás en tu tienda.** Pregunta de Leo: «¿cuándo verificás si está publicado o si está en borrador?». Hasta ahora, solo al cargar el borrador o cuando él lo contaba; los esquineros decorativos y el anclaje figuraban en borrador horas después de publicados.
+
+- **`estado_productos()`** (conector `taller3d-tienda`, solo lectura): el estado de cada producto en la tienda (borrador, publicado, pendiente de revisión, privado, programado, en la papelera o borrado), con su enlace si está publicado. Sin `ids`, revisa los que tiene anotados el panel (`taller-3d/catalogo.json`) y dice de qué pieza es cada uno; con `ids`, esos (hasta 100). Pregunta todos juntos y, los que no aparecen, de a uno: así distingue la papelera de un producto borrado. El conector pasa a la versión 0.3.0.
+- **`catalogo.py estados-tienda`:** anota en el panel lo que dijo la tienda. Publicada o borrador se anota sola (con el enlace a la página del producto, o al administrador si es borrador); en la papelera o borrado no se toca: se pregunta y, con el OK, `--sacar <carpeta>` la deja en vista previa, sin número, y la pieza vuelve a su paso sin la tienda. Si no cambió nada, no escribe.
+- **Cuándo:** al empezar cada conversación con el taller (si hay conector y piezas en la tienda) y antes de rehacer el panel. Si algo cambió, Claude rehace el panel y lo dice en una línea. Las skills `impresion-3d`, `panel` y `publicar`, `MANUAL.md`, `TIENDA-WOOCOMMERCE.md` (con una sección nueva, «Actualizar el conector») y `SECURITY.md` lo explican.
+- La línea de `catalogo.py agregar` dice «En la tienda (publicada)» cuando lo está (antes decía siempre «borrador»).
+- **Probado con la tienda real:** el 26/11, en printaia.com.ar, la consulta de la tienda (todos juntos con `include`, `status=any` y solo los campos necesarios) devolvió los 4 productos del panel publicados, y un número que no existe dio 404, que el conector toma como borrado. Con eso el panel anotó publicado el esquinero de volutas (publicado a las 05:23).
+- 1 prueba nueva (126 en total, 1 se saltea): estados desde el panel y por número, papelera y borrado, enlaces de otro sitio, datos malos, que no cambia nada en la tienda, y `estados-tienda` (anota, no reescribe sin cambios, pregunta y saca con `--sacar`).
+- **Para tenerlo:** el conector nuevo queda en `taller-3d/instalador/tienda_mcp.py` de tu carpeta de trabajo; instalalo con el comando de «Actualizar el conector» (`TIENDA-WOOCOMMERCE.md`) y reiniciá la app de Claude.
+
+## 0.1.40 (26/11/2026)
+
+**«Publicar» queda en la tarjeta hasta que la pieza está en la tienda.** Pedido de Leo: «no aparece el botón publicar… habíamos quedado que aun sin imprimir el botón tiene que estar».
+
+- **Panel:** con la publicación armada (vista previa), la tarjeta de la pieza sigue teniendo «Publicar», que ahora la carga en la tienda como borrador: hace lo mismo que «Cargala como borrador» de «Publicaciones». En claude.ai lleva la carpeta de la pieza, así que si la página puede usar `taller3d-tienda` la carga sin pasar por el chat y después le avisa a Claude para que la anote; si no, le manda el pedido a Claude. Antes, al armar la publicación el botón desaparecía de la tarjeta y había que buscarlo en «Publicaciones». Con el borrador en la tienda o publicada, ya no está.
+- El paso que sigue de una pieza con la publicación armada lo dice: «cargarla en la tienda con «Publicar»: queda como borrador».
+- `MANUAL.md`, las skills `panel` y `publicar` y `references/panel-al-costado.md` lo explican.
+- `test_publicar_sin_imprimir` cubre el botón con la publicación armada, en el panel al costado y en `panel.html`, y que desaparece con el borrador cargado (125 pruebas, 1 se saltea).
+
 ## 0.1.39 (23/11/2026)
 
 **Botón «Publicar» en cada pieza, impresa o no.** Pedido de Leo: «quisiera que exista un botón que diga publicar que no dependa de si ya lo imprimí… hay productos que yo sé que van a funcionar porque los conozco o bien porque yo ya subo el STL».

@@ -30,7 +30,7 @@
 #     --sin-app         no tocar la configuración de la app de Claude
 set -euo pipefail
 
-VERSION_PLUGIN="0.1.39"
+VERSION_PLUGIN="0.1.41"
 ORCA_VERSION="2.5.1"
 ORCA_ARCHIVO="OrcaSlicer_Linux_AppImage_Ubuntu2404_V${ORCA_VERSION}.AppImage"
 ORCA_URL="https://github.com/OrcaSlicer/OrcaSlicer/releases/download/v${ORCA_VERSION}/${ORCA_ARCHIVO}"

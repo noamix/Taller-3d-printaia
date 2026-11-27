@@ -34,6 +34,10 @@ Uso:
 
   # Cuando una idea se hace pieza: agregar la pieza con --de-idea ideas/AAAA-MM-DD_nombre (la idea pasa a la pieza)
 
+  # Anotar lo que dice la tienda (estado_productos del conector taller3d-tienda, guardado en estados.json):
+  # publicada o borrador se anota sola; en la papelera o borrado, se pregunta y, con el OK, --sacar <carpeta>
+  python3 catalogo.py estados-tienda --catalogo catalogo.json --estados estados.json [--sacar impresiones/...]
+
   # Sumar las piezas que ya estaban: listado de device_list_dir (recursive=true) de la carpeta de trabajo
   python3 catalogo.py desde-listado --catalogo catalogo.json --listado listado.json
 
@@ -218,6 +222,100 @@ def estado_publicacion(pieza: dict) -> str | None:
     return "borrador" if pieza.get("id_tienda") else "vista_previa"      # con número en la tienda, ya está cargada
 
 
+# Lo que dice la tienda de cada producto (estado_productos del conector taller3d-tienda, 0.1.41). Publicada o borrador
+# se anota sola: es lo que el usuario hizo en su tienda. En la papelera o borrado no se toca sin preguntarle.
+SIN_PUBLICAR = ("draft", "pending", "private", "future")
+FUERA_DE_LA_TIENDA = ("trash", "borrado")
+
+
+def _id_tienda(p: dict) -> int | None:
+    v = p.get("id_tienda")
+    if isinstance(v, str) and v.strip().isdigit():
+        v = int(v.strip())
+    return v if isinstance(v, int) and not isinstance(v, bool) and v > 0 else None
+
+
+def etiqueta_estado(p: dict) -> str:
+    """El paso de la pieza en palabras; en la tienda, si está publicada o en borrador."""
+    if p.get("estado") == "en_tienda":
+        return "En la tienda (publicada)" if estado_publicacion(p) == "publicada" else ESTADOS["en_tienda"]
+    return ESTADOS.get(p.get("estado"), str(p.get("estado")))
+
+
+def sacar_de_la_tienda(p: dict) -> None:
+    """El producto ya no está en la tienda (lo borraron): la publicación vuelve a vista previa, sin número, y la
+    pieza vuelve al paso que tiene sin la tienda."""
+    p.pop("id_tienda", None)
+    p.pop("url_tienda", None)
+    if isinstance(p.get("publicacion"), dict):
+        p["publicacion"]["estado"] = "vista_previa"
+    p["en_tienda"] = False
+    if p.get("estado") == "en_tienda":
+        archivos = [str(a).lower() for a in p.get("archivos") or []]
+        p["estado"] = ("impresa" if p.get("impresa") or any(es_foto_impresa(a) for a in archivos) else
+                       "laminada" if any(a.endswith(G_CODE) for a in archivos) else "disenada")
+
+
+def aplicar_estados_tienda(catalogo: dict, estados: dict, sacar: list[str] | None = None) -> dict:
+    """Anota en el panel lo que dice la tienda. Devuelve los cambios, lo que hay que preguntar y lo que se sacó."""
+    productos = estados.get("productos") if isinstance(estados, dict) else None
+    if not isinstance(productos, list):
+        raise SystemExit("No entiendo la respuesta de estado_productos: le falta «productos».")
+    por_id = {x["id"]: x for x in productos
+              if isinstance(x, dict) and isinstance(x.get("id"), int) and not isinstance(x.get("id"), bool)}
+    sacar = {normalizar_carpeta(c) for c in sacar or []}
+    salida = {"cambios": [], "para_preguntar": [], "sacadas": [], "revisadas": 0, "enlaces": 0}
+    for p in catalogo["piezas"]:
+        pid = _id_tienda(p)
+        x = por_id.get(pid) if pid else None
+        if x is None:
+            continue
+        salida["revisadas"] += 1
+        status, antes = x.get("status"), estado_publicacion(p)
+        nombre = p.get("nombre") or p.get("carpeta")
+        if status in FUERA_DE_LA_TIENDA:
+            como = "en la papelera" if status == "trash" else "borrado"
+            if p.get("carpeta") in sacar:
+                sacar_de_la_tienda(p)
+                p["actualizado"] = _ahora()
+                salida["sacadas"].append({"carpeta": p["carpeta"], "nombre": nombre, "id": pid, "estado": como})
+            else:
+                salida["para_preguntar"].append({"carpeta": p["carpeta"], "nombre": nombre, "id": pid, "estado": como})
+            continue
+        if status == "publish":
+            ahora, enlace = "publicada", url_segura(x.get("enlace"))
+        elif status in SIN_PUBLICAR:
+            ahora, enlace = "borrador", url_segura(x.get("enlace_admin"))
+        else:
+            continue
+        cambio = False
+        if antes is not None and ahora != antes:         # sin publicación armada en el panel, solo el enlace
+            p["publicacion"]["estado"] = ahora
+            salida["cambios"].append({"carpeta": p["carpeta"], "nombre": nombre, "id": pid, "antes": antes,
+                                      "ahora": ahora, "en_la_tienda": x.get("estado") or status})
+            cambio = True
+        if enlace and p.get("url_tienda") != enlace:     # publicada: la página del producto; borrador: el admin
+            p["url_tienda"] = enlace
+            salida["enlaces"] += 1
+            cambio = True
+        if cambio:
+            p["actualizado"] = _ahora()
+    return salida
+
+
+def contar_estados(r: dict) -> str:
+    """Lo que hizo estados-tienda, en una o dos líneas."""
+    def donde(c: dict) -> str:
+        return "está en la papelera de la tienda" if c["estado"] == "en la papelera" else "ya no está en la tienda"
+    partes = [f"«{c['nombre']}»: " + ("publicada en la tienda" if c["ahora"] == "publicada" else "volvió a borrador")
+              for c in r["cambios"]]
+    partes += [f"saqué del panel «{c['nombre']}» ({c['id']}): {donde(c)}" for c in r["sacadas"]]
+    texto = "; ".join(partes) + "." if partes else f"Sin cambios: revisé {r['revisadas']} productos de la tienda."
+    if r["para_preguntar"]:
+        texto += " Preguntar: " + "; ".join(f"«{c['nombre']}» ({c['id']}) {donde(c)}" for c in r["para_preguntar"]) + "."
+    return texto[:1].upper() + texto[1:]
+
+
 def agregar(catalogo: dict, carpeta: str, de_idea: str | None = None, **campos) -> dict:
     """Agrega o actualiza una pieza (o idea). Con de_idea, la idea anotada pasa a esta pieza."""
     carpeta = normalizar_carpeta(carpeta)
@@ -349,7 +447,8 @@ def siguiente(p: dict) -> str | None:
         if estado == "borrador" or "en_tienda" in h:
             return "Revisar el borrador en tu tienda y publicarlo. Imprimirla puede esperar a que te la compren."
         if estado == "vista_previa":
-            return "Ver cómo queda su publicación y cargarla como borrador (en Publicaciones), o imprimirla antes."
+            return ("Ver cómo queda su publicación (en Publicaciones) y cargarla en la tienda con «Publicar»: queda como "
+                    "borrador. O imprimirla antes.")
         return ("Imprimirla: pasá el G-code a la impresora (abrí el .3mf para verla en Orca) y después "
                 "contale a Claude cómo salió.")
     return None
@@ -418,8 +517,10 @@ def acciones(p: dict) -> list[tuple[str, str]]:
         botones += [(ABRIR_EN_ORCA, f"Desde el panel: abrí {cual} en Orca para que la vea."),
                     ("Ya la imprimí", f"Desde el panel: ya imprimí {cual}. Marcala como impresa y preguntame cómo salió.")]
     # «Publicar» no espera a la impresión (0.1.39): hay piezas que el usuario sabe que andan, o un STL que ya probó.
-    # Está hasta que la pieza tiene su publicación; después la siguen los botones de Publicaciones.
-    if "en_tienda" not in h and not estado_publicacion(p):
+    # Queda en la tarjeta hasta que la pieza está en la tienda (0.1.40): sin publicación, la arma; con la publicación
+    # armada (vista previa), la carga como borrador, igual que «Cargala como borrador» de Publicaciones.
+    publicacion = estado_publicacion(p)
+    if "en_tienda" not in h and not publicacion:
         if "impresa" in h:
             pedido = f"Desde el panel: armá la publicación de {cual} para la tienda."
         elif "laminada" in h:
@@ -428,6 +529,8 @@ def acciones(p: dict) -> list[tuple[str, str]]:
             pedido = (f"Desde el panel: armá la publicación de {cual} para la tienda, sin imprimirla antes. "
                       "Laminala solo para sacar el tiempo, los gramos y el costo.")
         botones.append((PUBLICAR, pedido))
+    elif "en_tienda" not in h and publicacion == "vista_previa":
+        botones.append((PUBLICAR, f"Desde el panel: cargá como borrador en la tienda la publicación de {cual}."))
     elif "impresa" in h:
         botones.append(("Revisá el precio", f"Desde el panel: revisá el precio de {cual}."))
     return botones
@@ -835,10 +938,20 @@ def _tarjeta(p: dict, modo: str = "archivo", imagenes: dict | None = None) -> st
     # le pide a la app de Claude que lo abra con el servidor local taller3d-orca; si no puede, se lo pide a Claude.
     proyecto = proyecto_de(p) if modo == "claude" else None
     # «Publicar» de una pieza sin laminar también arranca un laminado: lleva la impresora de arriba.
+    publicacion = estado_publicacion(p)
+    # Con la publicación armada, «Publicar» la carga como borrador: en claude.ai lleva la carpeta, como «Cargala como
+    # borrador» de Publicaciones, para que la página la cargue con taller3d-tienda sin pasar por el chat (0.1.40).
+    cargar = ""
+    if modo == "claude" and publicacion == "vista_previa":
+        cual = f"«{_en_una_linea(nombre) or _en_una_linea(carpeta, 160)}» ({_en_una_linea(carpeta, 160)})"
+        anotar = ("Desde el panel: el conector de la tienda cargó como borrador la publicación de " + cual +
+                  ". Anotalo en el panel.")
+        cargar = f' data-tienda="{e(_en_una_linea(carpeta, 160))}" data-anotar="{e(anotar)}"'
     botones = "".join(f'<button type="button" data-pedido="{e(pedido)}"'
                       + (f' data-orca="{e(proyecto)}"' if proyecto and etiqueta == ABRIR_EN_ORCA else "")
+                      + (cargar if etiqueta == PUBLICAR else "")
                       + (" data-impresora" if etiqueta in CON_IMPRESORA
-                         or etiqueta == PUBLICAR and "laminada" not in h else "")
+                         or etiqueta == PUBLICAR and "laminada" not in h and not publicacion else "")
                       + f'>{e(etiqueta)}</button>' for etiqueta, pedido in acciones(p))
     botones += '<button type="button" class="solo-claude" data-comentar>Otra cosa…</button>'
     fecha = p.get("fecha") or ""
@@ -1214,6 +1327,12 @@ def main(argv=None) -> None:
     rd = sub.add_parser("redireccion", help="catalogo.html que lleva al panel (para el de antes de la 0.1.13)")
     rd.add_argument("--salida", required=True, type=Path)
 
+    t = sub.add_parser("estados-tienda", help="anota en el panel si los productos están publicados o en borrador")
+    t.add_argument("--catalogo", required=True, type=Path)
+    t.add_argument("--estados", required=True, type=Path, help="lo que devolvió estado_productos (taller3d-tienda)")
+    t.add_argument("--sacar", nargs="*", default=[],
+                   help="carpetas de piezas cuyo producto está en la papelera o borrado y el usuario dijo de sacar")
+
     r = sub.add_parser("resumen", help="lista las piezas en texto")
     r.add_argument("--catalogo", required=True, type=Path)
     r.add_argument("--buscar")
@@ -1262,8 +1381,17 @@ def main(argv=None) -> None:
                         licencia=_en_una_linea(args.licencia, 80) if args.licencia else None,
                         **{k: v for k, v in extra.items() if k != "material"})
         guardar(args.catalogo, catalogo)
-        print(f"Catálogo: {pieza['nombre']} ({ESTADOS.get(pieza['estado'], pieza['estado'])}) — "
+        print(f"Catálogo: {pieza['nombre']} ({etiqueta_estado(pieza)}) — "
               f"{len(catalogo['piezas'])} piezas en total.")
+    elif args.accion == "estados-tienda":
+        estados = json.loads(args.estados.read_text(encoding="utf-8"))
+        if isinstance(estados, dict) and isinstance(estados.get("structuredContent"), dict):
+            estados = estados["structuredContent"]          # el resultado entero de la herramienta
+        r = aplicar_estados_tienda(catalogo, estados, args.sacar)
+        r["guardado"] = bool(r["cambios"] or r["sacadas"] or r["enlaces"])
+        if r["guardado"]:                                  # sin cambios no se toca (no hay nada que escribir en la PC)
+            guardar(args.catalogo, catalogo)
+        print(json.dumps({**r, "mensaje": contar_estados(r)}, ensure_ascii=False, indent=1))
     elif args.accion == "idea":
         idea = agregar_idea(catalogo, args.nombre, args.nota, args.impresora, args.fecha)
         guardar(args.catalogo, catalogo)

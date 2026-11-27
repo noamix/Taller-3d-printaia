@@ -652,8 +652,13 @@ class TestTienda(unittest.TestCase):
                 if ruta == "/wp/v2/users/me":
                     return self.responder(200, {"name": "Leo"})
                 if ruta == "/wc/v3/products" and metodo == "GET":
-                    return self.responder(200, [p for p in e["productos"].values()
-                                                if "sku" not in q or p["sku"] == q["sku"]])
+                    lista = [p for p in e["productos"].values() if "sku" not in q or p.get("sku") == q["sku"]]
+                    if "include" in q:
+                        lista = [p for p in lista if p["id"] in {int(x) for x in q["include"].split(",")}]
+                    estado = q.get("status", "any")
+                    lista = [p for p in lista if (p.get("status") != "trash" if estado == "any"
+                                                  else p.get("status") == estado)]
+                    return self.responder(200, lista)
                 if ruta == "/wc/v3/products" and metodo == "POST":
                     pid = e["siguiente"][0]
                     e["siguiente"][0] += 1
@@ -806,14 +811,106 @@ class TestTienda(unittest.TestCase):
         r = self.tm.procesar(srv, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual([t["name"] for t in r["result"]["tools"]],
                          ["cargar_borrador", "estado_tienda", "categorias_tienda", "crear_categoria",
-                          "cambiar_categorias"])
+                          "cambiar_categorias", "estado_productos"])
         solo_lectura = {t["name"]: t["annotations"]["readOnlyHint"] for t in r["result"]["tools"]}
         self.assertEqual(solo_lectura, {"cargar_borrador": False, "estado_tienda": True, "categorias_tienda": True,
-                                        "crear_categoria": False, "cambiar_categorias": False})
+                                        "crear_categoria": False, "cambiar_categorias": False,
+                                        "estado_productos": True})
         r = self.tm.procesar(srv, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
                                    "params": {"name": "estado_tienda", "arguments": {}}})
         self.assertTrue(r["result"]["structuredContent"]["conectada"])
         self.assertIn("Leo", r["result"]["structuredContent"]["mensaje"])
+
+    def test_estado_de_los_productos(self):
+        """0.1.41: estado_productos dice si los productos del panel están publicados, en borrador, en la papelera o
+        borrados, sin cambiar nada; catalogo.py estados-tienda lo anota en el panel."""
+        b = self.base
+        self.e["productos"] = {
+            201: {"id": 201, "name": "Kit &amp; escuadras", "status": "publish", "type": "simple", "price": "8700",
+                  "sku": "a", "permalink": f"{b}/producto/kit/", "date_modified": "2026-11-26T10:00:00"},
+            202: {"id": 202, "name": "Esquineros", "status": "draft", "type": "variable", "price": "11500", "sku": "b",
+                  "permalink": f"{b}/?post_type=product&p=202"},
+            203: {"id": 203, "name": "Viejo", "status": "trash", "sku": "c"},
+            205: {"id": 205, "name": "Afuera", "status": "publish", "sku": "d", "permalink": "https://otro.example/x/"}}
+        antes = json.dumps(self.e["productos"], sort_keys=True)
+        (self.trabajo / "taller-3d").mkdir(parents=True, exist_ok=True)
+        indice = self.trabajo / "taller-3d" / "catalogo.json"
+        pub = {"titulo": "X", "vista": "producto/vista-previa.html", "fotos": 1, "precio": {"valor": "1"}}
+        piezas = [
+            {"carpeta": "impresiones/2026-11-22_kit", "nombre": "Kit", "estado": "en_tienda", "id_tienda": 201,
+             "archivos": ["kit.gcode"], "publicacion": {**pub, "estado": "borrador"},
+             "url_tienda": f"{b}/wp-admin/post.php?post=201&action=edit"},
+            {"carpeta": "impresiones/2026-11-26_esquineros", "nombre": "Esquineros", "estado": "en_tienda",
+             "id_tienda": "202", "archivos": ["e.gcode"], "publicacion": {**pub, "estado": "publicada"}},
+            {"carpeta": "impresiones/2026-11-20_viejo", "nombre": "Viejo", "estado": "en_tienda", "id_tienda": 203,
+             "archivos": ["v.gcode", "foto.jpg"], "publicacion": {**pub, "estado": "borrador"}},
+            {"carpeta": "impresiones/2026-11-19_borrado", "nombre": "Borrado", "estado": "en_tienda", "id_tienda": 204,
+             "archivos": ["b.gcode"], "publicacion": {**pub, "estado": "borrador"}},
+            {"carpeta": "impresiones/2026-11-18_sin-tienda", "nombre": "Sin tienda", "estado": "laminada"},
+            {"carpeta": "impresiones/2026-11-17_repetido", "nombre": "Repetido", "id_tienda": 201}]
+        indice.write_text(json.dumps({"version": 1, "piezas": piezas}), encoding="utf-8")
+        srv = self.tm.Servidor(self.entorno)
+        salida, error = srv.productos({})
+        self.assertFalse(error, salida)
+        por_id = {x["id"]: x for x in salida["productos"]}
+        self.assertEqual(sorted(por_id), [201, 202, 203, 204])            # los del panel, sin repetir
+        self.assertEqual((por_id[201]["estado"], por_id[201]["carpeta"], por_id[201]["nombre"], por_id[201]["enlace"]),
+                         ("publicado", "impresiones/2026-11-22_kit", "Kit & escuadras", f"{b}/producto/kit/"))
+        self.assertEqual((por_id[202]["estado"], por_id[202]["enlace"], por_id[202]["tipo"]), ("borrador", None, "variable"))
+        self.assertEqual((por_id[203]["estado"], por_id[204]["estado"], por_id[204]["status"]),
+                         ("en la papelera", "borrado", "borrado"))
+        self.assertEqual(salida["resumen"], {"publicado": 1, "borrador": 1, "en la papelera": 1, "borrado": 1})
+        self.assertIn("No cambié nada", salida["mensaje"])
+        self.assertEqual(json.dumps(self.e["productos"], sort_keys=True), antes)      # solo lee
+        con_ids, error = srv.productos({"ids": [205, 201, 205]})
+        self.assertFalse(error, con_ids)
+        self.assertEqual([x["id"] for x in con_ids["productos"]], [205, 201])
+        self.assertIsNone(con_ids["productos"][0]["enlace"])                  # un enlace de otro sitio no se da
+        for malo in ({"ids": []}, {"ids": [0]}, {"ids": ["201"]}, {"ids": [True]}, {"ids": list(range(1, 102))},
+                     {"otra": 1}):
+            self.assertTrue(srv.productos(malo)[1], malo)
+        r = self.tm.procesar(srv, {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                                   "params": {"protocolVersion": "2025-06-18"}})
+        r = self.tm.procesar(srv, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                                   "params": {"name": "estado_productos", "arguments": {"ids": [202]}}})
+        self.assertEqual(r["result"]["structuredContent"]["productos"][0]["estado"], "borrador")
+        # El panel anota lo que dice la tienda: publicada y borrador solos; papelera y borrado, a preguntar
+        estados = self.tmp / "estados.json"
+        estados.write_text(json.dumps(salida), encoding="utf-8")
+
+        def anotar(*extra):
+            r = subprocess.run([sys.executable, str(SCRIPTS / "catalogo.py"), "estados-tienda", "--catalogo",
+                                str(indice), "--estados", str(estados), *extra], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            return json.loads(r.stdout), {p["carpeta"]: p for p in json.loads(indice.read_text(encoding="utf-8"))["piezas"]}
+        r, pz = anotar()
+        self.assertEqual([(c["carpeta"], c["ahora"]) for c in r["cambios"]],
+                         [("impresiones/2026-11-22_kit", "publicada"), ("impresiones/2026-11-26_esquineros", "borrador")])
+        self.assertEqual(pz["impresiones/2026-11-22_kit"]["publicacion"]["estado"], "publicada")
+        self.assertEqual(pz["impresiones/2026-11-22_kit"]["url_tienda"], f"{b}/producto/kit/")
+        self.assertEqual(pz["impresiones/2026-11-26_esquineros"]["url_tienda"], f"{b}/wp-admin/post.php?post=202&action=edit")
+        self.assertEqual(sorted(c["carpeta"] for c in r["para_preguntar"]),
+                         ["impresiones/2026-11-19_borrado", "impresiones/2026-11-20_viejo"])
+        self.assertEqual(pz["impresiones/2026-11-20_viejo"]["id_tienda"], 203)      # no se toca sin preguntar
+        self.assertIn("«Kit»: publicada en la tienda", r["mensaje"])
+        self.assertIn("«Esquineros»: volvió a borrador", r["mensaje"])
+        self.assertTrue(r["guardado"])
+        guardado = indice.read_text(encoding="utf-8")
+        r, _ = anotar()                                                        # otra vez: nada que cambiar
+        self.assertFalse(r["guardado"])
+        self.assertEqual(indice.read_text(encoding="utf-8"), guardado)
+        r, pz = anotar("--sacar", "impresiones/2026-11-20_viejo", "impresiones/2026-11-19_borrado")
+        self.assertEqual(len(r["sacadas"]), 2)
+        viejo, borrado = pz["impresiones/2026-11-20_viejo"], pz["impresiones/2026-11-19_borrado"]
+        self.assertNotIn("id_tienda", viejo)
+        self.assertEqual((viejo["estado"], viejo["publicacion"]["estado"]), ("impresa", "vista_previa"))   # tiene foto
+        self.assertEqual((borrado["estado"], borrado["publicacion"]["estado"]), ("laminada", "vista_previa"))
+        self.assertIn("Saqué del panel «Viejo» (203): está en la papelera de la tienda", r["mensaje"])
+        # Sin panel en la carpeta de trabajo, lo dice
+        indice.unlink()
+        salida, error = srv.productos({})
+        self.assertTrue(error)
+        self.assertIn("catalogo.json", salida["mensaje"])
 
     def test_panel_instalador_y_hooks(self):
         import catalogo
@@ -2111,7 +2208,7 @@ class TestPanelEnClaude(unittest.TestCase):
         self.assertIn("form.dato", con_taller)
 
     def test_publicar_sin_imprimir(self):
-        """0.1.39: «Publicar» está en cada pieza con modelo, impresa o no, hasta que tiene su publicación. Una pieza
+        """0.1.39: «Publicar» está en cada pieza con modelo, impresa o no; 0.1.40: hasta que está en la tienda. Una pieza
         publicada sin imprimir está terminada: se imprime cuando la compren."""
         import catalogo as cat
         c = {"version": 1, "piezas": []}
@@ -2143,15 +2240,29 @@ class TestPanelEnClaude(unittest.TestCase):
         self.assertRegex(tarjeta["Kabuto"], r'data-pedido="[^"]*Laminala[^"]*" data-impresora>Publicar</button>')
         self.assertRegex(tarjeta["Cubo"], r'data-pedido="[^"]*sin imprimirla antes\."[^>]*>Publicar</button>')
         self.assertNotIn("data-impresora>Publicar", tarjeta["Cubo"])
-        # Con la publicación armada, la siguen los botones de Publicaciones: en la tarjeta ya no está «Publicar»
+        # 0.1.40: con la publicación armada, «Publicar» sigue en la tarjeta hasta que la pieza está en la tienda: la
+        # carga como borrador (en claude.ai, directo con taller3d-tienda, como «Cargala como borrador» de Publicaciones)
         vista = {"titulo": "Cubo", "vista": cat.VISTA_PUBLICACION, "estado": "vista_previa"}
         cat.agregar(c, lista["carpeta"], publicacion=vista)
-        self.assertEqual([x[0] for x in cat.acciones(lista)], ["Abrila en Orca", "Ya la imprimí"])
-        self.assertIn("cargarla como borrador", cat.siguiente(lista))
+        self.assertEqual([x[0] for x in cat.acciones(lista)], ["Abrila en Orca", "Ya la imprimí", "Publicar"])
+        self.assertEqual(dict(cat.acciones(lista))["Publicar"],
+                         "Desde el panel: cargá como borrador en la tienda la publicación de «Cubo» "
+                         "(impresiones/2026-11-22_cubo_ender-3-v3-plus).")
+        self.assertIn("con «Publicar»: queda como borrador", cat.siguiente(lista))
         self.assertEqual((cat.grupo_de(lista), cat.quien_sigue(lista)), ("en_proceso", "vos"))
-        # Cargada como borrador: te toca publicarla en tu tienda; imprimirla puede esperar
+        en_claude = tarjeta_de(cat.generar_html(c, modo="claude"), "Cubo")
+        self.assertRegex(en_claude, r'data-pedido="Desde el panel: cargá como borrador en la tienda[^"]*" '
+                                    r'data-tienda="impresiones/2026-11-22_cubo_ender-3-v3-plus" '
+                                    r'data-anotar="Desde el panel: el conector de la tienda cargó como borrador la '
+                                    r'publicación de «Cubo»[^"]*">Publicar</button>')
+        self.assertNotIn("data-impresora>Publicar", en_claude)
+        en_archivo = tarjeta_de(cat.generar_html(c), "Cubo")    # en panel.html el botón copia el pedido
+        self.assertRegex(en_archivo, r'data-pedido="Desde el panel: cargá como borrador[^"]*">Publicar</button>')
+        self.assertNotIn("data-tienda", en_archivo)
+        # Cargada como borrador: te toca publicarla en tu tienda; imprimirla puede esperar. «Publicar» ya no está
         cat.agregar(c, lista["carpeta"], publicacion={**vista, "estado": "borrador"}, estado="en_tienda", id_tienda=7)
         self.assertIn("Revisar el borrador en tu tienda", cat.siguiente(lista))
+        self.assertEqual([x[0] for x in cat.acciones(lista)], ["Abrila en Orca", "Ya la imprimí"])
         self.assertEqual(cat.grupo_de(lista), "en_proceso")
         # Publicada sin imprimir: terminada, con el G-code listo para cuando la compren
         cat.agregar(c, lista["carpeta"], publicacion={**vista, "estado": "publicada"})

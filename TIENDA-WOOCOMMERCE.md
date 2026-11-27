@@ -9,6 +9,7 @@ Lo hace `tienda_mcp.py`, un programa chico de Python (sin dependencias) que arra
 - Crea el producto como borrador, o actualiza el borrador que ya existe (lo reconoce por su SKU): no lo duplica.
 - Sube las fotos (hasta 10) a la biblioteca de medios. Las que ya subió no las vuelve a subir.
 - Pone el producto en las categorías de tu tienda que le corresponden: Claude las elige entre las que ya tenés. Si ninguna encaja, te propone una nueva y la crea solo si le decís que sí. Las etiquetas que falten las crea.
+- Mira, sin cambiar nada, si los productos del panel siguen en borrador o ya los publicaste (o los mandaste a la papelera): así el panel se pone al día solo cada vez que trabajás con Claude.
 - **Nunca publica**, no borra nada y no toca pedidos, clientes ni otros productos. Si el producto ya está publicado, no lo cambia (salvo la categoría, si le decís que sí: y entonces solo eso).
 - Habla solo con tu tienda, por https, y no sigue redirecciones: así tu contraseña no viaja a otro sitio.
 - No sube el modelo 3D ni el G-code.
@@ -92,12 +93,21 @@ Queda `conectar-tienda.bat` en `%LOCALAPPDATA%\taller-3d`: con doble clic volvé
 
 - En la app de Claude, preguntá **«¿está conectada mi tienda?»**. Claude contesta con la dirección y tu usuario, sin cambiar nada.
 - Para la primera carga, armá la publicación de una pieza (`/taller-3d:publicar`), aprobá la vista previa y pedí que la cargue. Claude te da el enlace al borrador: revisalo en WordPress (**Productos → Borradores**) antes de publicarlo.
+- Preguntá **«¿qué productos tengo publicados?»**: Claude te dice cuáles del panel están publicados y cuáles en borrador, sin cambiar nada.
 - En el panel, sección **Publicaciones**: **«Cargala como borrador»**. La primera vez, la app te pide permiso para que el panel use el conector: aceptalo.
 
 ## Cambiar de tienda o de contraseña
 
 - **Linux y macOS:** `python3 ~/.local/share/taller-3d/tienda_mcp.py configurar`. Para ver si anda: `… tienda_mcp.py probar`.
 - **Windows:** doble clic en `conectar-tienda.bat` (en `%LOCALAPPDATA%\taller-3d`).
+
+## Actualizar el conector
+
+Cuando una versión nueva del taller cambia el conector (el CHANGELOG lo dice), Claude deja el `tienda_mcp.py` nuevo en `taller-3d/instalador/`, dentro de tu carpeta de trabajo. La conexión no se toca: no hace falta volver a poner la contraseña.
+
+- **Linux y macOS:** en una terminal, `install -m 0644 "<tu carpeta de trabajo>/taller-3d/instalador/tienda_mcp.py" ~/.local/share/taller-3d/tienda_mcp.py` (o corré de nuevo el instalador, que saltea lo que ya está: en el paso de la tienda, `s` para instalarlo y `n` para no conectarla de nuevo).
+- **Windows:** corré de nuevo el instalador (`instalar-windows.bat`) con la misma respuesta.
+- Después, cerrá la app de Claude del todo (**Salir**) y abrila de nuevo, para que arranque el conector nuevo.
 
 ## Desconectar
 
@@ -111,7 +121,7 @@ Queda `conectar-tienda.bat` en `%LOCALAPPDATA%\taller-3d`: con doble clic volvé
 | El conector | `~/.local/share/taller-3d/tienda_mcp.py` | `%LOCALAPPDATA%\taller-3d\tienda_mcp.py` |
 | La conexión (tienda, usuario y contraseña de aplicación) | `~/.config/taller-3d/credenciales-tienda.json`, que solo puede leer tu usuario | `%APPDATA%\taller-3d\credenciales-tienda.json` |
 
-La conexión queda fuera de las carpetas que Claude puede ver, y los bloqueos del taller no le dejan leerla, traerla ni copiarla: Claude nunca te va a pedir la contraseña. En la carpeta de cada pieza queda `producto/tienda.json`, con el número del producto en la tienda y los enlaces (sin la contraseña).
+La conexión queda fuera de las carpetas que Claude puede ver, y los bloqueos del taller no le dejan leerla, traerla ni copiarla: Claude nunca te va a pedir la contraseña. En la carpeta de cada pieza queda `producto/tienda.json`, con el número del producto en la tienda y los enlaces (sin la contraseña). Para ver qué productos están publicados, el conector lee también el panel (`taller-3d/catalogo.json`) y nada más.
 
 ## Problemas comunes
 
